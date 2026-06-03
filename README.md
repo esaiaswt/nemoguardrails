@@ -291,3 +291,29 @@ pytest tests/ -v
 ## License
 
 This project is for demonstration and educational purposes.
+
+## Built With
+
+This project was built using [**AWS Kiro**](https://kiro.dev) and its **Spec-Driven Development** methodology. Kiro's structured workflow guided the entire development process:
+
+```mermaid
+graph LR
+    A[Rough Idea] --> B[Requirements]
+    B --> C[Design]
+    C --> D[Implementation Tasks]
+    D --> E[Automated Execution]
+    E --> F[Working Application]
+
+    style A fill:#f9f,stroke:#333
+    style F fill:#9f9,stroke:#333
+```
+
+**Kiro Spec-Driven Development** transforms a rough idea into a fully implemented application through:
+
+1. **Requirements** — Formalized user stories with EARS-format acceptance criteria and correctness properties
+2. **Design** — Architecture diagrams, component interfaces, data models, and error handling strategies
+3. **Tasks** — Dependency-ordered implementation plan with wave-based parallel execution
+4. **Automated Execution** — Kiro's agent executes tasks autonomously, running tests at each checkpoint
+
+The spec files for this project are in `.kiro/specs/annoy-fastembed-rag/` and include requirements, design, and task documents that drove the implementation.
+
