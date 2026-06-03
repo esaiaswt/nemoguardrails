@@ -2,6 +2,9 @@
 
 An interactive Streamlit application showcasing **NVIDIA NeMo Guardrails** with full LLM-powered protection. The app demonstrates how NeMo Guardrails uses the LLM itself to detect prompt injections, classify intents, retrieve knowledge base context, and generate safe responses — all through the framework's declarative Colang 2.x configuration.
 
+## Screenshot
+<img width="960" height="504" alt="Screenshot 2026-06-03 145227" src="https://github.com/user-attachments/assets/58ce6439-fd9d-4d69-a26b-a3f9bbc86d40" />
+
 ## How NeMo Guardrails Works in This Project
 
 ### High-Level Architecture
