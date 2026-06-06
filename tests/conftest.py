@@ -97,10 +97,10 @@ mock_openai_module.APIError = Exception
 mock_openai_module.APIConnectionError = Exception
 
 # Insert mocks into sys.modules BEFORE app.py is imported
+# NOTE: Only mock streamlit, keyboard, psutil — these are never needed by API tests.
+# Do NOT mock openai or dotenv since the api_* modules need the real packages.
 sys.modules["streamlit"] = mock_st
 sys.modules["nemoguardrails"] = mock_nemoguardrails
 sys.modules["nemoguardrails.utils"] = mock_nemoguardrails_utils
 sys.modules["keyboard"] = mock_keyboard
 sys.modules["psutil"] = mock_psutil
-sys.modules["dotenv"] = mock_dotenv
-sys.modules["openai"] = mock_openai_module
