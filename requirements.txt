@@ -4,6 +4,11 @@ python-dotenv
 psutil
 keyboard
 
+# API server dependencies
+fastapi
+uvicorn[standard]
+httpx
+
 # RAG dependencies
 fastembed
 annoy
