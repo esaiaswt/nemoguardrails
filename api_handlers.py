@@ -6,8 +6,10 @@ formatting responses in the OpenAI Chat Completions response schema.
 
 import asyncio
 import logging
+import os
 import re
 import time
+from collections import deque
 from typing import Any, Optional, Union
 from uuid import uuid4
 
@@ -36,6 +38,33 @@ except ImportError:
 logger = logging.getLogger("api_server.handlers")
 
 DEFAULT_MODEL = "nvidia/llama-3.1-nemotron-nano-8b-v1"
+
+# Timeout for upstream requests (seconds). Prevents infinite hangs when NIM is degraded.
+REQUEST_TIMEOUT_SECONDS = int(os.environ.get("REQUEST_TIMEOUT", "60"))
+
+# Rate limiter: NVIDIA NIM allows 40 API calls per minute.
+# We track call timestamps and block if we'd exceed the limit.
+_RATE_LIMIT_MAX_CALLS = int(os.environ.get("NIM_RATE_LIMIT", "40"))
+_RATE_LIMIT_WINDOW_SECONDS = 60
+_call_timestamps: deque = deque()
+
+
+def _rate_limit_check() -> Optional[float]:
+    """Check if we're within the rate limit. Returns wait time if throttled, None if OK."""
+    now = time.time()
+    # Evict timestamps older than the window
+    while _call_timestamps and _call_timestamps[0] < now - _RATE_LIMIT_WINDOW_SECONDS:
+        _call_timestamps.popleft()
+    if len(_call_timestamps) >= _RATE_LIMIT_MAX_CALLS:
+        # Calculate how long to wait until the oldest call falls out of the window
+        wait_time = _call_timestamps[0] + _RATE_LIMIT_WINDOW_SECONDS - now
+        return max(wait_time, 0.1)
+    return None
+
+
+def _rate_limit_record():
+    """Record a call timestamp for rate limiting."""
+    _call_timestamps.append(time.time())
 
 
 def configure_logging():
@@ -135,13 +164,21 @@ async def handle_chat_completion(
 
     try:
         if mode == "guarded":
-            content, prompt_tokens, completion_tokens = await _handle_guarded(
-                messages_dicts, rails
+            content, prompt_tokens, completion_tokens = await asyncio.wait_for(
+                _handle_guarded(messages_dicts, rails),
+                timeout=REQUEST_TIMEOUT_SECONDS,
             )
         else:
-            content, prompt_tokens, completion_tokens = await _handle_unguarded(
-                messages_dicts, model_name, request, direct_client
+            content, prompt_tokens, completion_tokens = await asyncio.wait_for(
+                _handle_unguarded(messages_dicts, model_name, request, direct_client),
+                timeout=REQUEST_TIMEOUT_SECONDS,
             )
+    except asyncio.TimeoutError:
+        duration_ms = int((time.time() - start_time) * 1000)
+        logger.error(
+            f"Error {request_id}: type=TimeoutError, message=Request timed out after {REQUEST_TIMEOUT_SECONDS}s, duration_ms={duration_ms}"
+        )
+        return error_response(504, "upstream_timeout", f"Request timed out after {REQUEST_TIMEOUT_SECONDS} seconds. The upstream service may be degraded.")
     except openai.AuthenticationError as exc:
         logger.error(
             f"Error {request_id}: type=AuthenticationError, message={str(exc)}"
@@ -179,11 +216,19 @@ async def _handle_guarded(
     """Process messages through LLMRails (guarded mode).
 
     Wraps the synchronous rails.generate() call in asyncio.to_thread()
-    to avoid blocking the FastAPI event loop.
+    to avoid blocking the FastAPI event loop. Includes rate limiting
+    to stay within NVIDIA NIM's 40 calls/minute cap.
 
     Returns:
         Tuple of (content, prompt_tokens, completion_tokens).
     """
+    # Rate limit check — wait if we'd exceed NIM's limit
+    wait_time = _rate_limit_check()
+    if wait_time:
+        logger.info(f"Rate limit: waiting {wait_time:.1f}s before calling NIM")
+        await asyncio.sleep(wait_time)
+
+    _rate_limit_record()
     result = await asyncio.to_thread(rails.generate, messages=messages_dicts)
     content = result.get("content", "")
 
@@ -203,9 +248,19 @@ async def _handle_unguarded(
 ) -> tuple[str, int, int]:
     """Process messages through the direct OpenAI client (unguarded mode).
 
+    Includes rate limiting to stay within NVIDIA NIM's 40 calls/minute cap.
+
     Returns:
         Tuple of (content, prompt_tokens, completion_tokens).
     """
+    # Rate limit check — wait if we'd exceed NIM's limit
+    wait_time = _rate_limit_check()
+    if wait_time:
+        logger.info(f"Rate limit: waiting {wait_time:.1f}s before calling NIM")
+        await asyncio.sleep(wait_time)
+
+    _rate_limit_record()
+
     # Build kwargs for the API call
     kwargs = {
         "model": model_name,
