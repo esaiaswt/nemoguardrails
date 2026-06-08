@@ -43,28 +43,50 @@ DEFAULT_MODEL = "nvidia/llama-3.1-nemotron-nano-8b-v1"
 REQUEST_TIMEOUT_SECONDS = int(os.environ.get("REQUEST_TIMEOUT", "60"))
 
 # Rate limiter: NVIDIA NIM allows 40 API calls per minute.
-# We track call timestamps and block if we'd exceed the limit.
+# In guarded mode, each request to api_server triggers ~3 internal NIM calls
+# (input rail check + LLM response + possible KB/output rail). To stay within
+# the 40 calls/minute budget with the same API key, we limit incoming requests
+# to ~12 per minute (40 / 3 ≈ 13, with safety margin).
+_NIM_CALLS_PER_REQUEST_GUARDED = 3  # safety check + response + output rail
+_NIM_CALLS_PER_REQUEST_UNGUARDED = 1  # direct passthrough
 _RATE_LIMIT_MAX_CALLS = int(os.environ.get("NIM_RATE_LIMIT", "40"))
 _RATE_LIMIT_WINDOW_SECONDS = 60
 _call_timestamps: deque = deque()
 
 
-def _rate_limit_check() -> Optional[float]:
-    """Check if we're within the rate limit. Returns wait time if throttled, None if OK."""
+def _rate_limit_check(cost: int = 1) -> Optional[float]:
+    """Check if we're within the rate limit.
+
+    Args:
+        cost: Number of NIM API calls this request will consume
+              (3 for guarded mode, 1 for unguarded).
+
+    Returns:
+        Wait time in seconds if throttled, None if OK.
+    """
     now = time.time()
     # Evict timestamps older than the window
     while _call_timestamps and _call_timestamps[0] < now - _RATE_LIMIT_WINDOW_SECONDS:
         _call_timestamps.popleft()
-    if len(_call_timestamps) >= _RATE_LIMIT_MAX_CALLS:
-        # Calculate how long to wait until the oldest call falls out of the window
-        wait_time = _call_timestamps[0] + _RATE_LIMIT_WINDOW_SECONDS - now
+    if len(_call_timestamps) + cost > _RATE_LIMIT_MAX_CALLS:
+        # Calculate how long to wait until enough calls fall out of the window
+        # We need `cost` slots free, so find the timestamp that needs to expire
+        slots_needed = len(_call_timestamps) + cost - _RATE_LIMIT_MAX_CALLS
+        target_timestamp = _call_timestamps[slots_needed - 1]
+        wait_time = target_timestamp + _RATE_LIMIT_WINDOW_SECONDS - now
         return max(wait_time, 0.1)
     return None
 
 
-def _rate_limit_record():
-    """Record a call timestamp for rate limiting."""
-    _call_timestamps.append(time.time())
+def _rate_limit_record(cost: int = 1):
+    """Record call timestamps for rate limiting.
+
+    Args:
+        cost: Number of NIM API call slots to consume.
+    """
+    now = time.time()
+    for _ in range(cost):
+        _call_timestamps.append(now)
 
 
 def configure_logging():
@@ -223,12 +245,13 @@ async def _handle_guarded(
         Tuple of (content, prompt_tokens, completion_tokens).
     """
     # Rate limit check — wait if we'd exceed NIM's limit
-    wait_time = _rate_limit_check()
+    # Guarded mode consumes ~3 NIM calls per request (input rail + response + output rail)
+    wait_time = _rate_limit_check(cost=_NIM_CALLS_PER_REQUEST_GUARDED)
     if wait_time:
-        logger.info(f"Rate limit: waiting {wait_time:.1f}s before calling NIM")
+        logger.info(f"Rate limit: waiting {wait_time:.1f}s before calling NIM (guarded mode, cost={_NIM_CALLS_PER_REQUEST_GUARDED})")
         await asyncio.sleep(wait_time)
 
-    _rate_limit_record()
+    _rate_limit_record(cost=_NIM_CALLS_PER_REQUEST_GUARDED)
     result = await asyncio.to_thread(rails.generate, messages=messages_dicts)
     content = result.get("content", "")
 
@@ -254,12 +277,13 @@ async def _handle_unguarded(
         Tuple of (content, prompt_tokens, completion_tokens).
     """
     # Rate limit check — wait if we'd exceed NIM's limit
-    wait_time = _rate_limit_check()
+    # Unguarded mode consumes 1 NIM call per request (direct passthrough)
+    wait_time = _rate_limit_check(cost=_NIM_CALLS_PER_REQUEST_UNGUARDED)
     if wait_time:
-        logger.info(f"Rate limit: waiting {wait_time:.1f}s before calling NIM")
+        logger.info(f"Rate limit: waiting {wait_time:.1f}s before calling NIM (unguarded mode, cost={_NIM_CALLS_PER_REQUEST_UNGUARDED})")
         await asyncio.sleep(wait_time)
 
-    _rate_limit_record()
+    _rate_limit_record(cost=_NIM_CALLS_PER_REQUEST_UNGUARDED)
 
     # Build kwargs for the API call
     kwargs = {
